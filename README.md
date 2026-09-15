@@ -1,6 +1,12 @@
 # Firewall Hardening and Service Exposure Remediation
 
-Building a default deny UFW policy, validating it with Nmap, finding an exposed MySQL service the firewall rule did not actually close, and fixing it properly.
+Building a default deny UFW policy, validating it with Nmap, finding an exposed MySQL service the original policy never accounted for, and closing it.
+
+![Firewall Hardening Validation Flow](./screenshots/00_architecture.png)
+
+The workflow moved from firewall policy to validation, remediation, and final verification.
+
+The key lesson was simple: a firewall rule, a running service, and a scan result are three different claims. Each needs its own evidence.
 
 ## At a Glance
 
@@ -10,111 +16,225 @@ Building a default deny UFW policy, validating it with Nmap, finding an exposed 
 | Tools Used | UFW, Nmap 7.99, systemctl |
 | Host | Kali Linux VM, localhost |
 | Default Inbound Policy | Deny |
-| Allowed | SSH 22, HTTP 80, HTTPS 443 |
-| Denied | Telnet 23, FTP 21, RDP 3389, MySQL 3306 |
-| Outcome | 7 rules active, MySQL exposure found during validation and closed with layered remediation |
+| Allowed by Policy | SSH 22, HTTP 80, HTTPS 443 |
+| Denied by Policy | Telnet 23, FTP 21, RDP 3389, MySQL 3306 |
+| Observed Open During Validation | HTTP 80, MySQL 3306 |
+| Final Observed State | HTTP 80 open |
+| Outcome | MySQL exposure found during validation and closed with a layered response |
 
 ## What Happened
 
-A default deny firewall policy was built on a Kali host, with explicit allows for the services that are needed and explicit denies for the ones that are not.
+I built a default deny firewall policy on a Kali Linux host.
 
-Then it was tested, and the test is where the lab earned its value. Nmap found MySQL listening on 3306, which the policy had not accounted for. A UFW deny rule was applied. The rescan showed it still reachable.
+SSH, HTTP, and HTTPS were allowed by policy. Telnet, FTP, and RDP were explicitly denied.
 
-That failure is the whole project. Writing the rule felt like fixing it. The rescan proved it was not fixed. Everything worth learning here happened in the gap between those two moments.
+I then used Nmap to validate what was actually reachable.
+
+The scan found two open ports:
+
+```text
+80/tcp    open    http
+3306/tcp  open    mysql
+```
+
+MySQL was not part of the original firewall policy.
+
+I added a UFW deny rule for 3306/tcp and verified that the rule appeared in the policy.
+
+I also stopped the MySQL service directly.
+
+A final Nmap scan showed only 80/tcp open.
+
+There is no scan captured between adding the UFW rule and stopping MySQL. Because of that, this project does not claim that the firewall rule alone failed or succeeded.
+
+The evidence supports the full remediation sequence and the final validated state.
 
 ## UFW Enablement
 
 ![UFW Enabled](./screenshots/01_ufw_enabled.png)
 
-Initial state verified as inactive, then activated with ufw enable and confirmed active and persistent across startup.
+I first checked whether UFW was running.
 
-Checking the state first matters. An inactive firewall with a beautiful ruleset is a wall with no bricks in it.
+```bash
+sudo ufw status
+```
+
+The firewall was inactive.
+
+I enabled it and confirmed that it would remain enabled at system startup.
+
+```bash
+sudo ufw enable
+```
+
+This matters because firewall rules provide no protection while the firewall itself is inactive.
 
 ## Default Deny Policy
 
 ![Default Policy](./screenshots/02_ufw_default_policy.png)
 
-Verified via ufw status verbose: deny incoming, allow outgoing, deny routed. Logging confirmed active.
+I verified the firewall configuration with:
 
-Default deny is the only posture that makes allow rules mean anything. Under default allow, an allow rule is a comment. Under default deny, it is a decision.
+```bash
+sudo ufw status verbose
+```
 
-Logging is on because a firewall that blocks silently tells you nothing about who is knocking.
+The output confirmed:
+
+```text
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), deny (routed)
+```
+
+The default deny policy means unsolicited incoming traffic is denied unless a rule explicitly permits it.
+
+Logging was also enabled, providing visibility into firewall activity.
 
 ## Initial Rule Set
 
 ![Initial Rules](./screenshots/03_ufw_rules_numbered.png)
 
-Allow rules for SSH 22, HTTP 80, HTTPS 443. Explicit deny rules for Telnet 23, FTP 21, RDP 3389. Rule numbering verified with ufw status numbered.
+I reviewed the active rules with:
 
-The explicit denies are technically redundant under default deny. They are there anyway, because a rule list is also a document. An auditor reading it should see that Telnet was considered and rejected, not left out by accident.
+```bash
+sudo ufw status numbered
+```
 
-Telnet and FTP are denied because they carry credentials in cleartext. RDP is denied because it is the single most common ransomware ingress path there is.
+The policy allowed:
 
-IPv6 rules are auto generated alongside IPv4. Both get reviewed. A policy that only covers v4 is half a policy.
+```text
+22/tcp   SSH
+80/tcp   HTTP
+443/tcp  HTTPS
+```
+
+The policy explicitly denied:
+
+```text
+23/tcp    Telnet
+21/tcp    FTP
+3389/tcp  RDP
+```
+
+The explicit deny rules are redundant under a default deny policy, but they make the intended security policy visible during review.
+
+IPv4 and IPv6 entries were both present.
 
 ## Validation Scan and Discovery
 
 ![Nmap Scan Results](./screenshots/04_nmap_scan_results.png)
 
+I validated the host with:
+
 ```bash
 sudo nmap -sT localhost
 ```
 
-Allowed services responded as expected.
+The scan returned:
 
-MySQL was found listening on 3306/tcp. It was not in the policy at all.
+```text
+PORT      STATE SERVICE
+80/tcp    open  http
+3306/tcp  open  mysql
+```
 
-This is why validation exists. The ruleset described a host that did not exist. Nmap described the one that did.
+This exposed an important difference between firewall configuration and actual service exposure.
 
-## First Remediation Attempt
+SSH 22 and HTTPS 443 were allowed by policy, but this scan did not observe either port listening.
+
+HTTP 80 was both allowed and observed open.
+
+MySQL 3306 was observed open even though it was not part of the original policy design.
+
+The firewall configuration described what traffic should be permitted.
+
+Nmap showed what was actually reachable from the scan's vantage point.
+
+## Firewall Remediation
 
 ![UFW Deny MySQL](./screenshots/05_ufw_deny_mysql.png)
+
+I added an explicit deny rule for MySQL:
 
 ```bash
 sudo ufw deny 3306/tcp
 ```
 
-Rule applied for both IPv4 and IPv6, confirmation captured.
+UFW confirmed that the rule was added for both IPv4 and IPv6.
 
-At this point the ticket looks closeable. The finding has a rule against it. This is exactly where a lot of remediation stops.
+This changed the firewall policy so that MySQL was explicitly denied.
 
 ## Rule Verification
 
 ![Final Rules](./screenshots/06_ufw_final_rules.png)
 
-ufw status numbered re run, confirming 3306/tcp DENY IN present in the policy. Seven unique rules, fourteen entries counting IPv6.
+I reloaded UFW and reviewed the numbered rules.
 
-The rule is there. That confirms the rule exists. It does not confirm the port is closed, and those are different claims.
+```bash
+sudo ufw reload
+sudo ufw status numbered
+```
 
-## Re Validation and Root Cause
+The output confirmed:
+
+```text
+3306/tcp    DENY IN    Anywhere
+3306/tcp    DENY IN    Anywhere (v6)
+```
+
+The final policy contained seven unique service rules, with corresponding IPv6 entries.
+
+This proves that the MySQL deny rule existed in the firewall policy.
+
+It does not independently prove what happened to port 3306 immediately after the rule was added because I did not capture an Nmap scan at that point.
+
+That distinction is important.
+
+Configuration evidence proves configuration.
+
+Validation evidence proves observed behavior.
+
+## Service Shutdown and Final Validation
 
 ![Nmap Post Remediation](./screenshots/07_nmap_post_remediation.png)
 
-The rescan showed 3306/tcp still reachable.
-
-Root cause: UFW does not filter traffic on the loopback interface by default. The rule was correct and the rule was irrelevant, because the traffic never passed through the chain the rule sits in.
-
-Second layer applied:
+I also stopped the MySQL service directly:
 
 ```bash
 sudo systemctl stop mysql
 ```
 
-Final scan returned 80/tcp open http and nothing else. Closed.
+Then I performed the final validation scan:
 
-The lesson is not about UFW. It is that a control only works where it sits in the path. A service that binds to loopback is not protected by a firewall that does not filter loopback, and no amount of correct rule syntax changes that. The only thing that caught this was scanning again after saying it was fixed.
+```bash
+sudo nmap -sT localhost
+```
+
+The result showed:
+
+```text
+PORT   STATE SERVICE
+80/tcp open  http
+```
+
+MySQL 3306 no longer appeared.
+
+Stopping an unnecessary service reduces attack surface directly because the service is no longer listening.
+
+The final scan confirmed the end state rather than assuming the remediation worked.
 
 ## Firewall Policy
 
 | Port | Service | Action | Reason |
 | --- | --- | --- | --- |
-| 22/tcp | SSH | Allow | Remote administration, encrypted |
+| 22/tcp | SSH | Allow | Encrypted remote administration |
 | 80/tcp | HTTP | Allow | Web server traffic |
 | 443/tcp | HTTPS | Allow | Encrypted web traffic |
-| 21/tcp | FTP | Deny | Cleartext credentials |
-| 23/tcp | Telnet | Deny | Cleartext credentials |
-| 3389/tcp | RDP | Deny | Common ransomware ingress path |
-| 3306/tcp | MySQL | Deny | Database, no business on an ingress path |
+| 21/tcp | FTP | Deny | Cleartext protocol not required |
+| 23/tcp | Telnet | Deny | Cleartext protocol not required |
+| 3389/tcp | RDP | Deny | Remote access service not required |
+| 3306/tcp | MySQL | Deny | Database service not required for inbound access |
 
 ## Exposure Finding
 
@@ -122,84 +242,152 @@ The lesson is not about UFW. It is that a control only works where it sits in th
 | --- | --- |
 | Port | 3306/tcp |
 | Service | MySQL |
-| Risk | Directly reachable database service |
 | Discovery | Nmap validation scan against localhost |
-| First action | UFW deny rule applied |
-| Result | Still reachable, UFW does not filter loopback by default |
-| Second action | Service stopped via systemctl |
-| Re validation | Post remediation Nmap scan confirmed closed |
-| Status | Remediated, layered |
+| Initial State | MySQL observed listening on 3306/tcp |
+| Firewall Action | UFW deny rule applied |
+| Rule Verification | 3306/tcp confirmed as DENY IN |
+| Service Action | MySQL stopped with systemctl |
+| Final Validation | Nmap showed only 80/tcp open |
+| Status | Remediated and final state verified |
 
 ## Exposure Indicators
 
 | Type | Indicator | Source |
 | --- | --- | --- |
-| Exposed service | MySQL on 3306/tcp | Nmap scan |
-| Allowed surface | SSH 22, HTTP 80, HTTPS 443 | Policy definition |
-| Denied surface | Telnet 23, FTP 21, RDP 3389 | Policy audit |
-| Control limitation | UFW does not filter the lo interface by default | Validation test |
+| Observed Service | MySQL on 3306/tcp | Initial Nmap scan |
+| Observed Open Ports | 80/tcp, 3306/tcp | Initial Nmap scan |
+| Allowed by Policy | SSH 22, HTTP 80, HTTPS 443 | UFW policy |
+| Explicitly Denied by Policy | Telnet 23, FTP 21, RDP 3389 | UFW policy |
+| Added Remediation Rule | MySQL 3306 DENY IN | UFW policy |
+| Final Observed State | HTTP 80 only | Final Nmap scan |
 
-## MITRE ATT&CK Relevance
+## MITRE ATT&CK Context
 
-| Technique | ID | Why It Applies |
-| --- | --- | --- |
-| Network service discovery | T1046 | Nmap mirrors how an attacker finds 3306 |
-| External remote services | T1133 | The allowed surface is what this policy defines |
-| Remote services, RDP | T1021.001 | Denied at the perimeter |
-| Remote services, SSH | T1021.004 | Allowed, therefore the ingress path that needs monitoring |
+### T1046: Network Service Discovery
 
-Mapping note: these are the techniques the policy is written against. Nothing was observed or attempted. This is a hardening build, not an intrusion.
+Nmap was used to identify listening services on the host.
+
+This demonstrates the same type of service discovery activity represented by T1046.
+
+The project did not observe an attacker performing this technique. Nmap was used by the analyst for defensive validation.
+
+The firewall rules for SSH, RDP, and other services represent attack surface decisions rather than evidence that MITRE ATT&CK techniques involving those services occurred.
+
+For that reason, T1046 is the primary ATT&CK technique demonstrated by the lab.
 
 ## Analyst Findings
 
-Default deny ingress implemented and verified active.
+The host firewall was enabled and configured with default deny for incoming traffic.
 
-Three services explicitly allowed, four explicitly denied, seven unique rules.
+SSH 22, HTTP 80, and HTTPS 443 were allowed by policy.
 
-MySQL found exposed on 3306 during validation, absent from the original policy.
+Telnet 23, FTP 21, and RDP 3389 were explicitly denied.
 
-The firewall deny rule alone did not close it, because the service was reachable on loopback.
+The initial Nmap validation scan observed HTTP 80 and MySQL 3306 open.
 
-Layered remediation, firewall rule plus service shutdown, closed the exposure.
+SSH and HTTPS were permitted by policy but were not observed listening in that scan.
 
-Closure confirmed by rescan, not by assumption.
+MySQL 3306 was not accounted for in the original policy.
+
+A deny rule for 3306/tcp was added and confirmed in UFW.
+
+The MySQL service was then stopped directly.
+
+The final Nmap scan showed only HTTP 80 open.
+
+The project does not claim that the UFW rule alone closed or failed to close MySQL because no scan was captured between the firewall change and the service shutdown.
+
+## Analyst Verdict
+
+The firewall policy was successfully hardened and the unexpected MySQL exposure was identified during validation.
+
+The final state was verified with Nmap rather than inferred from the firewall configuration.
+
+The strongest finding was not simply that port 3306 existed.
+
+It was that security configuration and actual host exposure must be validated separately.
 
 ## Recommended Response
 
-Keep default deny ingress as the baseline and treat every allow as a decision that needs a reason.
+Keep default deny as the inbound firewall baseline.
 
-Validate with an external scan after every policy change, because the ruleset and the host disagree more often than anyone expects.
+Document why every allowed service needs to remain reachable.
 
-Treat every database service, MySQL, PostgreSQL, MSSQL, Redis, as deny by default.
+Validate firewall changes with a scan instead of relying only on the ruleset.
 
-Audit listening services with ss -tulpn regularly, since the firewall can only filter what it sees.
+Capture a validation scan after each individual remediation action.
 
-Stop or rebind services that have no reason to be on the network at all. Not listening beats being blocked.
+Review listening services regularly with:
 
-Forward UFW logs to Splunk so ingress denials become alertable rather than just written to disk.
+```bash
+ss -tulpn
+```
 
-Schedule recurring Nmap audits to catch drift.
+Stop or reconfigure services that do not need to be listening.
+
+Forward firewall logs into the SIEM where they can support monitoring and investigation.
+
+Repeat exposure scans periodically to identify configuration drift or newly introduced services.
 
 ## What This Lab Demonstrates
 
-Building a default deny host firewall policy and understanding why the order matters.
+This project demonstrates how I can:
 
-Writing an auditable ruleset where the intent is visible, including the explicit denies.
+* Build and verify a default deny host firewall policy.
+* Review allowed and denied network services.
+* Validate actual service exposure with Nmap.
+* Distinguish policy configuration from observed network state.
+* Identify a service missing from the original policy.
+* Add and verify a remediation rule.
+* Reduce attack surface by stopping an unnecessary service.
+* Confirm the final state with a rescan.
+* Recognize where the evidence does not support a stronger conclusion.
 
-Validating policy against reality with an external scan rather than trusting the config.
+## Lessons Learned
 
-Finding an exposure that the policy design missed entirely.
+The most important lesson came from reviewing the project's own evidence.
 
-Diagnosing why a correct rule failed, rather than assuming the rule worked.
+I did not capture a scan between adding the UFW deny rule and stopping MySQL.
 
-Applying layered remediation and proving closure with a confirming rescan.
+That means I cannot prove what effect the firewall rule had by itself.
+
+The original explanation went further than the evidence supported.
+
+Correcting that changed how I think about remediation evidence.
+
+A configuration change is evidence that an action was taken.
+
+A configuration check is evidence that the change exists.
+
+A rescan is evidence of the observed result.
+
+Those are different claims and should not be treated as interchangeable.
+
+## What I Would Improve
+
+I would capture an Nmap scan immediately after every individual remediation action.
+
+That would let me verify the effect of the firewall rule separately from the effect of stopping the service.
+
+I would also run:
+
+```bash
+ss -tulpn
+```
+
+alongside Nmap.
+
+This would let me compare what the operating system reports as listening with what the scanner can actually reach.
+
+If loopback filtering became relevant to the investigation, I would test that behavior directly and capture the result before using it as the explanation.
 
 ## Repository Structure
 
-```
-firewall-rules-network-segmentation-lab/
+```text
+.
 ├── README.md
 └── screenshots/
+    ├── 00_architecture.png
     ├── 01_ufw_enabled.png
     ├── 02_ufw_default_policy.png
     ├── 03_ufw_rules_numbered.png
@@ -211,5 +399,10 @@ firewall-rules-network-segmentation-lab/
 
 ---
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-WilliamInCyber-blue?style=flat&logo=linkedin)](https://linkedin.com/in/WilliamInCyber)
-[![X](https://img.shields.io/badge/X-WilliamInCyber-black?style=flat&logo=x)](https://x.com/WilliamInCyber)
+## Author
+
+William Gokah
+
+SOC Analyst Portfolio
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-WilliamInCyber-blue?style=flat&logo=linkedin)](https://linkedin.com/in/WilliamInCyber) [![X](https://img.shields.io/badge/X-WilliamInCyber-black?style=flat&logo=x)](https://x.com/WilliamInCyber)
